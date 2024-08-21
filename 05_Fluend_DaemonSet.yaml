@@ -1,101 +1,75 @@
 apiVersion: v1
-kind: ServiceAccount
+kind: ConfigMap
 metadata:
-  name: fluentd-es
+  name: fluentd-config
   namespace: efklog
   labels:
-    k8s-app: fluentd-es
-    addonmanager.kubernetes.io/mode: Reconcile
----
-kind: ClusterRole
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: fluentd-es
-  labels:
-    k8s-app: fluentd-es
-    addonmanager.kubernetes.io/mode: Reconcile
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - "namespaces"
-  - "pods"
-  verbs:
-  - "get"
-  - "watch"
-  - "list"
----
-kind: ClusterRoleBinding
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: fluentd-es
-  labels:
-    k8s-app: fluentd-es
-    addonmanager.kubernetes.io/mode: Reconcile
-subjects:
-- kind: ServiceAccount
-  name: fluentd-es
-  namespace: efklog
-  apiGroup: ""
-roleRef:
-  kind: ClusterRole
-  name: fluentd-es
-  apiGroup: ""
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: fluentd-es-v2.7.0
-  namespace: efklog
-  labels:
-    k8s-app: fluentd-es
-    version: v2.7.0
-    addonmanager.kubernetes.io/mode: Reconcile
-spec:
-  selector:
-    matchLabels:
-      k8s-app: fluentd-es
-      version: v2.7.0
-  template:
-    metadata:
-      labels:
-        k8s-app: fluentd-es
-        version: v2.7.0
-      # This annotation ensures that fluentd does not get evicted if the node
-      # supports critical pod annotation based priority scheme.
-      # Note that this does not guarantee admission on the nodes (#40573).
-      annotations:
-        scheduler.alpha.kubernetes.io/critical-pod: ''
-    spec:
-      serviceAccountName: fluentd-es
-      containers:
-      - name: fluentd-es
-        image: quay.io/fluentd_elasticsearch/fluentd:v2.7.0
-        env:
-        - name: FLUENTD_ARGS
-          value: --no-supervisor -q
-        resources:
-          limits:
-            memory: 500Mi
-          requests:
-            cpu: 100m
-            memory: 200Mi
-        volumeMounts:
-        - name: varlog
-          mountPath: /var/log
-        - name: varlibdockercontainers
-          mountPath: /var/lib/docker/containers
-          readOnly: true
-        - name: config-volume
-          mountPath: /etc/fluent/config.d
-      terminationGracePeriodSeconds: 30
-      volumes:
-      - name: varlog
-        hostPath:
-          path: /var/log
-      - name: varlibdockercontainers
-        hostPath:
-          path: /var/lib/docker/containers
-      - name: config-volume
-        configMap:
-          name: fluentd-es-config-v0.2.0
+    k8s-app: fluentd-logging
+data:
+  fluent.conf: |
+    <source>
+      @type tail
+      path /var/log/containers/*.log
+      pos_file /var/log/containers/fluentd-containers.log.pos
+      tag kubernetes.*
+      format json
+      time_key time
+      time_format %Y-%m-%dT%H:%M:%S.%N%z
+      read_from_head true
+      <parse>
+        @type multi_format
+        <pattern>
+          format json
+          time_key time
+          time_format %Y-%m-%dT%H:%M:%S.%N%z
+        </pattern>
+        <pattern>
+          format regexp
+          expression /^(?<time>[^ ]* [^ ]*) (?<stream>[^ ]*) (?<log>.*)$/
+          time_format %Y-%m-%dT%H:%M:%S.%N%z
+        </pattern>
+      </parse>
+    </source>
+
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+    </filter>
+
+    # Filter to include only logs for specific components
+    <filter kubernetes.**>
+      @type grep
+      <regexp>
+        key $.kubernetes.container_name
+        pattern /(kube-apiserver|kube-scheduler|kube-controller-manager)/
+      </regexp>
+    </filter>
+
+    <match **>
+      @type elasticsearch
+      @log_level info
+      include_tag_key true
+      host elasticsearch-logging.efklog.svc.cluster.local
+      port 9200
+      logstash_format true
+      logstash_prefix kubernetes
+      logstash_dateformat %Y.%m.%d
+      type_name _doc
+      scheme http
+      ssl_verify false
+      user elastic
+      password changeme
+      reload_connections true
+      reconnect_on_error true
+      request_timeout 120s
+      time_key @timestamp
+      time_key_exclude_timestamp false
+      utc_index true
+      buffer_chunk_limit 2M
+      buffer_queue_limit 8
+      flush_interval 5s
+      max_retry_wait 30s
+      disable_retry_limit false
+      retry_wait 1s
+      retry_max_interval 30
+      num_threads 1
+    </match>
